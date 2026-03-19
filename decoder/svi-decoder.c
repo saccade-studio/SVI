@@ -131,6 +131,33 @@ static PFNEGLCREATEIMAGEKHRPROC pCreateImage;
 static PFNEGLDESTROYIMAGEKHRPROC pDestroyImage;
 static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC pTexImage;
 
+static inline int wait_render_gpu_complete(void) {
+    GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!fence) {
+        glFinish();
+        return 1;
+    }
+
+    glFlush();
+    GLenum st = GL_TIMEOUT_EXPIRED;
+    for (int i = 0; i < 4; i++) {
+        st = glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000ULL); /* 1ms */
+        if (st == GL_ALREADY_SIGNALED || st == GL_CONDITION_SATISFIED)
+            break;
+        if (st == GL_WAIT_FAILED)
+            break;
+    }
+
+    if (st == GL_TIMEOUT_EXPIRED || st == GL_WAIT_FAILED) {
+        glFinish();
+        glDeleteSync(fence);
+        return 1;
+    }
+
+    glDeleteSync(fence);
+    return 0;
+}
+
 /* ─── Shaders ─── */
 
 static const char *vs_src =
@@ -376,6 +403,12 @@ static void send_clock_ping(struct receiver *rs) {
 
 int main(int argc, char **argv) {
     int port = (argc > 1) ? atoi(argv[1]) : 5004;
+    int async_flip = 0;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--async-flip") == 0)
+            async_flip = 1;
+    }
+    int async_flip_enabled = async_flip;
     g_listen_port = port;
 
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -386,6 +419,7 @@ int main(int argc, char **argv) {
 
     printf("svi-decoder: EGL zero-copy H.264 VAAPI receiver (UDP)\n");
     printf("Listening on UDP port %d\n\n", port);
+    printf("Flip mode: %s\n", async_flip ? "async-requested" : "sync");
 
     /* ── 1. DRM + GBM ── */
     int drm_fd = open("/dev/dri/card0", O_RDWR);
@@ -588,6 +622,7 @@ int main(int argc, char **argv) {
     AVFrame *hw_frame = av_frame_alloc();
     int buf_idx = 0;
     int n_frames = 0, n_rendered = 0, n_export_fail = 0, n_import_fail = 0;
+    int n_gl_fallback = 0;
     int awaiting_keyframe = 1;
     uint64_t t_start = now_ns();
     uint64_t t_last_stats = t_start;
@@ -756,14 +791,23 @@ int main(int argc, char **argv) {
             glBindFramebuffer(GL_FRAMEBUFFER, fbo[buf_idx]);
             glClear(GL_COLOR_BUFFER_BIT);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-            glFinish();
+            n_gl_fallback += wait_render_gpu_complete();
             t2 = now_ns();
             sum_render += (t2 - t1) / 1e6;
 
             /* Async page flip */
             t1 = now_ns();
-            ret = drmModePageFlip(drm_fd, crtc_id, fb_id[buf_idx],
-                                  DRM_MODE_PAGE_FLIP_EVENT, NULL);
+            uint32_t flip_flags = DRM_MODE_PAGE_FLIP_EVENT;
+            if (async_flip_enabled)
+                flip_flags |= DRM_MODE_PAGE_FLIP_ASYNC;
+            ret = drmModePageFlip(drm_fd, crtc_id, fb_id[buf_idx], flip_flags, NULL);
+            if (ret == -EINVAL && async_flip_enabled) {
+                async_flip_enabled = 0;
+                ret = drmModePageFlip(drm_fd, crtc_id, fb_id[buf_idx],
+                                      DRM_MODE_PAGE_FLIP_EVENT, NULL);
+                if (ret == 0)
+                    fprintf(stderr, "Async flip unsupported, falling back to sync\n");
+            }
             t2 = now_ns();
             sum_flip += (t2 - t1) / 1e6;
 
@@ -801,6 +845,8 @@ int main(int argc, char **argv) {
                 printf("%.1ffps | %d rendered | active=%.2fms/f",
                        fps, n_rendered,
                        (sum_export + sum_import + sum_render + sum_flip) / n_rendered);
+                if (n_gl_fallback > 0)
+                    printf(" | glfb=%d", n_gl_fallback);
                 if (n_latency > 0)
                     printf(" | latency=%.1fms", sum_latency / n_latency);
                 if (rs.frames_dropped > 0)
@@ -840,6 +886,7 @@ int main(int argc, char **argv) {
                sum_wait / n_rendered,
                sum_render / n_rendered, sum_flip / n_rendered,
                (sum_export + sum_import + sum_render + sum_flip) / n_rendered);
+        printf("GL fallback syncs: %d\n", n_gl_fallback);
         if (n_latency > 0)
             printf("Avg latency: %.1fms (over %d samples)\n", sum_latency / n_latency, n_latency);
     }

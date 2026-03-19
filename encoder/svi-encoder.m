@@ -110,6 +110,7 @@ typedef struct {
 
     /* pacing */
     uint64_t frame_interval_ns;
+    uint32_t pace_mbps;
 
     /* frame counter */
     uint32_t frame_counter;
@@ -120,6 +121,7 @@ typedef struct {
     volatile uint64_t n_bytes_sent;
     uint64_t stats_time;
     volatile uint64_t n_queue_full;
+    volatile uint64_t n_gl_fallback;
 
     /* clock sync */
     int listen_sock;
@@ -127,11 +129,37 @@ typedef struct {
 
 static enc_ctx g_enc;
 
+static inline void wait_blit_gpu_complete(enc_ctx *enc) {
+    GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!fence) {
+        glFinish();
+        __sync_fetch_and_add(&enc->n_gl_fallback, 1);
+        return;
+    }
+
+    glFlush();
+    GLenum st = GL_TIMEOUT_EXPIRED;
+    for (int i = 0; i < 4; i++) {
+        st = glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000ULL); /* 1ms */
+        if (st == GL_ALREADY_SIGNALED || st == GL_CONDITION_SATISFIED)
+            break;
+        if (st == GL_WAIT_FAILED)
+            break;
+    }
+
+    if (st == GL_TIMEOUT_EXPIRED || st == GL_WAIT_FAILED) {
+        glFinish();
+        __sync_fetch_and_add(&enc->n_gl_fallback, 1);
+    }
+    glDeleteSync(fence);
+}
+
 /* ---------- sender thread ---------- */
 
 static void *sender_thread(void *arg) {
     enc_ctx *enc = (enc_ctx *)arg;
-    uint64_t pace_ns = (uint64_t)MAX_PAYLOAD * 8 * 1000 / 200; /* ~56μs per pkt @ 200Mbps */
+    uint32_t pace_mbps = enc->pace_mbps ? enc->pace_mbps : 200;
+    uint64_t pace_ns = (uint64_t)MAX_PAYLOAD * 8 * 1000 / pace_mbps; /* per-packet pacing */
     uint8_t pkt_buf[sizeof(struct pkt_hdr) + MAX_PAYLOAD];
 
     while (g_running) {
@@ -365,7 +393,7 @@ static GLuint create_blit_program(void) {
 
 int main(int argc, const char *argv[]) {
     if (argc < 4) {
-        fprintf(stderr, "Usage: %s <syphon_name> <dest_ip> <dest_port> [bitrate_mbps]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <syphon_name> <dest_ip> <dest_port> [bitrate_mbps] [pace_mbps]\n", argv[0]);
         return 1;
     }
 
@@ -373,13 +401,15 @@ int main(int argc, const char *argv[]) {
     const char *dest_ip = argv[2];
     int dest_port = atoi(argv[3]);
     int bitrate_mbps = (argc > 4) ? atoi(argv[4]) : 40;
+    int pace_mbps = (argc > 5) ? atoi(argv[5]) : 200;
+    if (pace_mbps < 50) pace_mbps = 50;
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
     mach_timebase_info(&g_timebase);
 
-    fprintf(stderr, "svi-encoder: name=%s dest=%s:%d bitrate=%dMbps\n",
-            syphon_name, dest_ip, dest_port, bitrate_mbps);
+    fprintf(stderr, "svi-encoder: name=%s dest=%s:%d bitrate=%dMbps pace=%dMbps\n",
+            syphon_name, dest_ip, dest_port, bitrate_mbps, pace_mbps);
 
     @autoreleasepool {
 
@@ -464,6 +494,7 @@ int main(int argc, const char *argv[]) {
 
     /* --- UDP socket --- */
     memset(&g_enc, 0, sizeof(g_enc));
+    g_enc.pace_mbps = (uint32_t)pace_mbps;
     g_enc.sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (g_enc.sock < 0) { perror("socket"); return 1; }
     int sndbuf = 524288;
@@ -617,8 +648,8 @@ int main(int argc, const char *argv[]) {
     CFRelease(limitWindow);
 
     VTCompressionSessionPrepareToEncodeFrames(vtSession);
-    fprintf(stderr, "VTCompressionSession ready: %dMbps, GOP=%d, low-latency\n",
-            bitrate_mbps, gop);
+    fprintf(stderr, "VTCompressionSession ready: %dMbps, GOP=%d, pace=%dMbps, low-latency\n",
+            bitrate_mbps, gop, pace_mbps);
 
     /* --- frame pacing --- */
     g_enc.frame_interval_ns = 16666667; /* 60fps */
@@ -723,7 +754,7 @@ int main(int argc, const char *argv[]) {
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glDisableVertexAttribArray(0);
 
-        glFinish(); /* ensure blit completes before VT reads IOSurface */
+        wait_blit_gpu_complete(&g_enc); /* ensure blit completes before VT reads IOSurface */
 
         img = nil; /* release */
 
@@ -749,13 +780,14 @@ int main(int argc, const char *argv[]) {
             double fps = (double)g_enc.n_encoded / secs;
             double mbps = (double)g_enc.n_bytes_sent * 8.0 / secs / 1e6;
             int sq_queued = g_sq.write_idx - g_sq.read_idx;
-            fprintf(stderr, "[stats] %.1ffps  %.1fMbps  enc=%llu drop=%llu qfull=%llu q=%d  cap=%llu\n",
+            fprintf(stderr, "[stats] %.1ffps  %.1fMbps  enc=%llu drop=%llu qfull=%llu glfb=%llu q=%d  cap=%llu\n",
                     fps, mbps, g_enc.n_encoded, g_enc.n_dropped,
-                    g_enc.n_queue_full, sq_queued, frame_count);
+                    g_enc.n_queue_full, g_enc.n_gl_fallback, sq_queued, frame_count);
             g_enc.n_encoded = 0;
             g_enc.n_dropped = 0;
             g_enc.n_bytes_sent = 0;
             g_enc.n_queue_full = 0;
+            g_enc.n_gl_fallback = 0;
             g_enc.stats_time = now;
         }
     }
