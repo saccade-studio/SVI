@@ -1,11 +1,17 @@
 #!/bin/bash
 # Deploy SVI-Decoder binary + start script to remote device
-# Usage: ./deploy.sh [host] [port]
+# Usage: ./deploy.sh [host] [port] [async|sync]
 
 HOST="${1:-192.168.0.14}"
 PORT="${2:-5004}"
+FLIP_MODE="${3:-async}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DECODER_DIR="$SCRIPT_DIR/../decoder"
+
+if [[ "$FLIP_MODE" != "async" && "$FLIP_MODE" != "sync" ]]; then
+    echo "Invalid flip mode '$FLIP_MODE' (use 'async' or 'sync')" >&2
+    exit 1
+fi
 
 SSH_OPTS="-o PubkeyAuthentication=no -o PreferredAuthentications=password -o StrictHostKeyChecking=no"
 SSH_CMD="sshpass -p "${SSH_PASSWORD}" ssh $SSH_OPTS root@$HOST"
@@ -28,8 +34,8 @@ echo "Building on device..."
 $SSH_CMD "chmod +x /root/build.sh && cd /root && bash build.sh"
 
 # Copy and run start script
-echo "Starting decoder on port $PORT..."
+echo "Starting decoder on port $PORT ($FLIP_MODE flip)..."
 $SCP_CMD "$SCRIPT_DIR/start_decoder.sh" "root@$HOST:/root/start_decoder.sh"
-$SSH_CMD "chmod +x /root/start_decoder.sh && /root/start_decoder.sh"
+$SSH_CMD "chmod +x /root/start_decoder.sh && /root/start_decoder.sh $PORT $FLIP_MODE"
 
 echo "=== Deploy complete ==="

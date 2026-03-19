@@ -63,8 +63,8 @@ cd decoder && bash build.sh
 
 **Run:**
 ```bash
-LIBVA_DRIVER_NAME=i965 chrt -f 50 taskset -c 1-3 ./svi-decoder 5004
-# arg: udp_port
+LIBVA_DRIVER_NAME=i965 chrt -f 50 taskset -c 1-3 ./svi-decoder 5004 --async-flip
+# args: udp_port [--async-flip]
 ```
 
 ## Scripts (`scripts/`)
@@ -74,7 +74,8 @@ LIBVA_DRIVER_NAME=i965 chrt -f 50 taskset -c 1-3 ./svi-decoder 5004
 
 **Deploy:**
 ```bash
-cd scripts && bash deploy.sh 192.168.0.14 5004
+cd scripts && bash deploy.sh 192.168.0.14 5004 async
+# args: [host] [port] [async|sync], default flip mode is async
 ```
 
 ## Packet Protocol
