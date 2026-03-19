@@ -548,11 +548,12 @@ int main(int argc, char **argv) {
     glUseProgram(prog);
     glUniform1i(glGetUniformLocation(prog, "tex"), 0);
 
+    /* VAAPI DMA-BUF import is top-origin, so flip V to avoid upside-down output. */
     float verts[] = {
-        -1, -1,   0, 0,
-         1, -1,   1, 0,
-        -1,  1,   0, 1,
-         1,  1,   1, 1,
+        -1, -1,   0, 1,
+         1, -1,   1, 1,
+        -1,  1,   0, 0,
+         1,  1,   1, 0,
     };
     GLuint vao, vbo_gl;
     glGenVertexArrays(1, &vao);
