@@ -1,117 +1,127 @@
 # Saccade Video Interface (SVI)
 
-Ultra-low-latency 1080p60 video pipeline from Resolume Arena to HDMI projectors over Ethernet.
+Ultra-low-latency 1080p60 video pipeline from Resolume Arena to HDMI display over GigE. Captures via Syphon (zero-copy GPU), encodes H.264 with VideoToolbox, streams over paced UDP, and decodes with VAAPI hardware acceleration on a Linux display node.
+
+**Typical end-to-end latency: ~21–23ms** (async flip, GigE)
+
+---
 
 ## Architecture
 
 ```
-Resolume Arena (Syphon output, 1080p60 BGRA)
-  → SVI-Encoder (Mac, Objective-C)
-    → SyphonClient → IOSurface FBO blit (GPU)
-      → VTCompressionSession (H.264, low-latency)
-        → AVCC→Annex B + custom UDP packets (24B header + 1400B payload)
-          → Paced send (configurable rate cap, default 200 Mbps) → GigE
-            → SVI-Decoder (Mac or Linux, C)
-              → UDP recv → frame reassembly (8-slot ring buffer)
-                → avcodec_send_packet (VAAPI H.264 decode)
-                  → DMA-BUF → EGLImage (NV12) → DRM page flip (sync/async) → HDMI
+Resolume Arena  ──Syphon──▶  svi-encoder (Mac)  ──UDP/GigE──▶  svi-decoder (Linux)  ──DRM──▶  HDMI
+                              IOSurface capture                   VAAPI H.264 decode
+                              VideoToolbox H.264                  DMA-BUF → EGL → GBM
+                              paced UDP send                      async page flip
 ```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for a full pipeline breakdown, packet protocol spec, and tuning guide.
+
+---
 
 ## Components
 
-| Component | Platform | Description |
-|-----------|----------|-------------|
-| **SVI-Encoder** | Mac only | Syphon capture → H.264 encode → paced UDP send |
-| **SVI-Decoder** | Mac or Linux | UDP receive → H.264 decode → display output |
-| **SVI-Toolkit** | TBD | Utilities and diagnostics (coming later) |
+| Component | Platform | Purpose |
+|-----------|----------|---------|
+| `svi-encoder` | macOS | Syphon capture → H.264 encode → paced UDP send |
+| `svi-decoder` | Linux | UDP receive → H.264 decode → DRM display |
+| `svi-list` | macOS | List available Syphon servers |
 
-## Performance
+---
 
-| Metric | Value |
-|--------|-------|
-| FPS | ~59-60 (matches Arena output) |
-| Bandwidth | ~38-40 Mbps per stream |
-| End-to-end latency (default: pace=200, async flip) | ~21-23ms avg |
-| End-to-end latency (uplink-constrained: pace=150, async flip) | ~20-22ms avg |
-| End-to-end latency (pace=150, sync flip) | ~40ms avg |
-| Packet loss (test runs) | 0 dropped frames, 0 packets lost |
+## Requirements
 
-Measured on March 19, 2026 using local Arena encoder + remote Intel Cherry Trail decoder (`192.168.0.14`) over point-to-point GigE.
+**Encoder (Mac)**
+- macOS with Syphon-compatible source (tested: Resolume Arena)
+- Resolume Arena installed (provides `Syphon.framework`)
+- GigE NIC
 
-## SVI-Encoder (`encoder/`)
+**Decoder (Linux)**
+- Intel integrated GPU with VAAPI support (`i965` or `iHD` driver)
+- Packages: `libdrm`, `libgbm`, `libEGL`, `libGLESv2`, `libavcodec`, `libavutil`, `libva`, `libva-drm`
+- GigE NIC; direct or switched link to encoder
 
-Runs on Mac. Captures from Syphon, encodes H.264 via VideoToolbox, sends paced UDP.
+---
 
-**Build** (requires Resolume Arena installed for Syphon.framework):
+## Quick Start
+
+### 1. Build the encoder (Mac)
+
 ```bash
 cd encoder && bash build.sh
 ```
 
-**Run:**
+Requires Resolume Arena at the default install path. See [ARCHITECTURE.md](ARCHITECTURE.md) if Arena is installed elsewhere.
+
+### 2. Deploy and start the decoder (Linux target)
+
 ```bash
-./svi-encoder Composition 192.168.0.14 5004 40 150
-# args: syphon_name dest_ip dest_port [bitrate_mbps] [pace_mbps]
-# defaults: bitrate_mbps=40, pace_mbps=200
+# Copy source, build on device, and start — uses SSH key auth by default
+cd scripts && bash deploy.sh <target-ip>
+
+# Password auth (if SSH keys aren't set up)
+SSH_PASSWORD=<password> bash deploy.sh <target-ip>
 ```
 
-**Utilities:**
-- `svi-list` — discover available Syphon servers
+`deploy.sh` compiles the decoder on the target device and starts it with RT scheduling.
 
-## SVI-Decoder (`decoder/`)
+### 3. Run the encoder
 
-Receives UDP, decodes H.264, renders to display. Currently targeting Intel Atom (Cherry Trail) with VAAPI on Linux.
-
-**Build** (on the target device):
 ```bash
-cd decoder && bash build.sh
+# List available Syphon sources
+./svi-list
+
+# Stream to decoder
+./svi-encoder <syphon-name> <dest-ip> <dest-port> [bitrate-mbps] [pace-mbps]
+
+# Example: 40 Mbps encode, 200 Mbps pacing
+./svi-encoder Composition 192.168.1.10 5004 40 200
 ```
 
-**Run:**
-```bash
-LIBVA_DRIVER_NAME=i965 chrt -f 50 taskset -c 1-3 ./svi-decoder 5004 --async-flip
-# args: udp_port [--async-flip]
+---
+
+## Performance
+
+Measured on 2026-03-19, Intel Cherry Trail decoder over point-to-point GigE:
+
+| Configuration | End-to-end latency |
+|---------------|-------------------|
+| pace=200, async flip | ~21–23ms avg |
+| pace=150, async flip | ~20–22ms avg |
+| pace=150, sync flip | ~40ms avg |
+
+- **FPS**: ~59–60 (matches Arena output)
+- **Bandwidth**: ~38–40 Mbps per 1080p60 stream
+- **Packet loss**: 0 dropped frames across all test runs
+
+---
+
+## Decoder Flags
+
+```
+svi-decoder <port> [--async-flip]
 ```
 
-`--async-flip` is now actively applied (`DRM_MODE_PAGE_FLIP_ASYNC`) with automatic fallback to sync flip when unsupported by the display driver.
+| Flag | Description |
+|------|-------------|
+| `--async-flip` | Use `DRM_MODE_PAGE_FLIP_ASYNC` (recommended; auto-falls back to sync if unsupported) |
 
-## Scripts (`scripts/`)
+---
 
-- `start_decoder.sh` — start SVI-Decoder with RT scheduling
-- `deploy.sh` — copy, build, and start SVI-Decoder on remote device
+## Scripts
 
-**Deploy:**
-```bash
-cd scripts && bash deploy.sh 192.168.0.14 5004 async
-# args: [host] [port] [async|sync], default flip mode is async
-```
+| Script | Description |
+|--------|-------------|
+| `scripts/deploy.sh <host> [port] [async\|sync]` | Build and start decoder on remote device |
+| `scripts/start_decoder.sh [port] [async\|sync]` | Start decoder locally with RT scheduling |
+| `scripts/stress-test-6x.sh <dest-ip> [duration]` | Multi-stream panoramic stress test |
 
-## Packet Protocol
+**Authentication for deploy scripts** (choose one):
+- SSH key: ensure your public key is authorised on the target device
+- Password: `export SSH_PASSWORD=<password>` before running
 
-24-byte header per UDP datagram, max 1400-byte payload (fits under 1472-byte MTU-safe limit):
+---
 
-```c
-struct pkt_hdr {
-    uint32_t frame_id;       // Monotonic frame counter (network byte order)
-    uint16_t pkt_idx;        // 0-based packet index within frame
-    uint16_t pkt_total;      // Total packets in this frame
-    uint32_t payload_len;    // Bytes of H.264 data in this packet (≤1400)
-    uint8_t  flags;          // bit 0: keyframe, bit 1: end-of-frame
-    uint8_t  reserved[3];
-    uint64_t encode_ts_ns;   // Encoder timestamp for latency measurement
-};
-```
+## License
 
-Clock sync uses ping-pong on `data_port + 1` every 10 seconds.
-
-## Key Design Decisions
-
-- **Syphon** over NDI: zero-copy IOSurface GPU capture, eliminates ~12ms NDI encode
-- **Direct VTCompressionSession** over ffmpeg wrapper: eliminates ~42ms pipeline buffering
-- **Paced UDP** over TCP/MPEG-TS: no head-of-line blocking, no mux overhead, configurable rate cap (`pace_mbps`) to fit shared-uplink budgets
-- **Sender thread**: VT callback queues to ring buffer, dedicated thread does paced send — keeps VT unblocked
-- **Frame handler callback** over polling: Syphon notifies on new frame via block callback
-- **Bitmap-based dedup**: `uint64_t[24]` bitmap supports up to 1500 packets per frame
-- **Multi-frame processing**: decoder processes up to 4 frames per recv iteration to prevent falling behind
-- **Encoder restart detection**: if incoming frame_id is >1000 behind last_decoded_id, reset decoder state
-- **Fence-based GPU sync**: encoder/decoder use `glFenceSync`/`glClientWaitSync` with bounded fallback to `glFinish()` instead of unconditional full-pipeline stalls
-- **Display flip mode control**: decoder supports sync and async page flip; async mode materially reduces flip wait latency at the same bandwidth cap
+MIT — see [LICENSE](LICENSE).
