@@ -1,8 +1,12 @@
 #!/bin/bash
 # Deploy SVI-Decoder binary + start script to remote device
-# Usage: ./deploy.sh [host] [port] [async|sync]
+# Usage: ./deploy.sh <host> [port] [async|sync]
+#
+# Authentication (choose one):
+#   SSH key (preferred):  ensure your key is authorised on the target device
+#   Password:             set SSH_PASSWORD=<password> in your environment
 
-HOST="${1:-192.168.0.14}"
+HOST="${1:?Usage: deploy.sh <host> [port] [async|sync]}"
 PORT="${2:-5004}"
 FLIP_MODE="${3:-async}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -13,9 +17,15 @@ if [[ "$FLIP_MODE" != "async" && "$FLIP_MODE" != "sync" ]]; then
     exit 1
 fi
 
-SSH_OPTS="-o PubkeyAuthentication=no -o PreferredAuthentications=password -o StrictHostKeyChecking=no"
-SSH_CMD="sshpass -p "${SSH_PASSWORD}" ssh $SSH_OPTS root@$HOST"
-SCP_CMD="sshpass -p "${SSH_PASSWORD}" scp $SSH_OPTS"
+SSH_OPTS="-o StrictHostKeyChecking=no"
+if [[ -n "${SSH_PASSWORD:-}" ]]; then
+    SSH_OPTS="-o PubkeyAuthentication=no -o PreferredAuthentications=password $SSH_OPTS"
+    SSH_CMD="sshpass -p \"$SSH_PASSWORD\" ssh $SSH_OPTS root@$HOST"
+    SCP_CMD="sshpass -p \"$SSH_PASSWORD\" scp $SSH_OPTS"
+else
+    SSH_CMD="ssh $SSH_OPTS root@$HOST"
+    SCP_CMD="scp $SSH_OPTS"
+fi
 
 echo "=== Deploying SVI-Decoder to $HOST ==="
 
@@ -27,6 +37,7 @@ sleep 0.5
 # Copy source + build script
 echo "Copying decoder source..."
 $SCP_CMD "$DECODER_DIR/svi-decoder.c" "root@$HOST:/root/svi-decoder.c"
+$SCP_CMD "$DECODER_DIR/visible_rect.h" "root@$HOST:/root/visible_rect.h"
 $SCP_CMD "$DECODER_DIR/build.sh" "root@$HOST:/root/build.sh"
 
 # Build on device

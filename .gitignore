@@ -1,0 +1,10 @@
+# Compiled binaries
+encoder/svi-encoder
+encoder/svi-list
+decoder/tests/.visible_rect_test
+
+# Logs
+*.log
+
+# Claude Code local settings
+.claude/
