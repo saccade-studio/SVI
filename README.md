@@ -1,6 +1,6 @@
 # Saccade Video Interface (SVI)
 
-Ultra-low-latency 1080p60 video pipeline from Resolume Arena to HDMI display over GigE. Captures via Syphon (zero-copy GPU), encodes H.264 with VideoToolbox, streams over paced UDP, and decodes with VAAPI hardware acceleration on a Linux display node.
+Ultra-low-latency 1080p60 video pipeline from Resolume Arena to HDMI display over GigE. Captures via Syphon (zero-copy GPU), encodes HEVC (H.265) with VideoToolbox, streams over paced UDP, and decodes with VAAPI hardware acceleration on a Linux display node. H.264 is also supported but HEVC is preferred.
 
 **Typical end-to-end latency: ~21–23ms** (async flip, GigE)
 
@@ -10,8 +10,8 @@ Ultra-low-latency 1080p60 video pipeline from Resolume Arena to HDMI display ove
 
 ```
 Resolume Arena  ──Syphon──▶  svi-encoder (Mac)  ──UDP/GigE──▶  svi-decoder (Linux)  ──DRM──▶  HDMI
-                              IOSurface capture                   VAAPI H.264 decode
-                              VideoToolbox H.264                  DMA-BUF → EGL → GBM
+                              IOSurface capture                   VAAPI HEVC decode
+                              VideoToolbox HEVC                   DMA-BUF → EGL → GBM
                               paced UDP send                      async page flip
 ```
 
@@ -23,8 +23,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for a full pipeline breakdown, packet pro
 
 | Component | Platform | Purpose |
 |-----------|----------|---------|
-| `svi-encoder` | macOS | Syphon capture → H.264 encode → paced UDP send |
-| `svi-decoder` | Linux | UDP receive → H.264 decode → DRM display |
+| `svi-encoder` | macOS | Syphon capture → HEVC/H.264 encode → paced UDP send |
+| `svi-decoder` | Linux | UDP receive → HEVC/H.264 decode → DRM display |
 | `svi-list` | macOS | List available Syphon servers |
 
 ---
@@ -71,10 +71,13 @@ SSH_PASSWORD=<password> bash deploy.sh <target-ip>
 # List available Syphon sources
 ./svi-list
 
-# Stream to decoder
-./svi-encoder <syphon-name> <dest-ip> <dest-port> [bitrate-mbps] [pace-mbps]
+# Stream to decoder (HEVC, recommended)
+./svi-encoder <syphon-name> <dest-ip> <dest-port> [bitrate-mbps] [pace-mbps] --hevc
 
-# Example: 40 Mbps encode, 200 Mbps pacing
+# Example: 40 Mbps encode, 200 Mbps pacing, HEVC
+./svi-encoder Composition 192.168.1.10 5004 40 200 --hevc
+
+# H.264 fallback (omit --hevc flag)
 ./svi-encoder Composition 192.168.1.10 5004 40 200
 ```
 
@@ -99,12 +102,13 @@ Measured on 2026-03-19, Intel Cherry Trail decoder over point-to-point GigE:
 ## Decoder Flags
 
 ```
-svi-decoder <port> [--async-flip]
+svi-decoder <port> [--async-flip] [--hevc]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--async-flip` | Use `DRM_MODE_PAGE_FLIP_ASYNC` (recommended; auto-falls back to sync if unsupported) |
+| `--hevc` | Decode HEVC (H.265) stream; must match encoder (recommended) |
 
 ---
 
