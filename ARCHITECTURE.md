@@ -33,8 +33,8 @@ Deep-dive reference for the Saccade Video Interface pipeline. Covers encoder and
 │       │ GL_TEXTURE_RECTANGLE → IOSurface FBO blit                       │
 │       │ glFenceSync / glClientWaitSync (4 × 1ms, fallback glFinish)    │
 │       ▼                                                                 │
-│  VTCompressionSession (H.264, VideoToolbox)                             │
-│       │ AVCC → Annex B, SPS/PPS injected on keyframes                  │
+│  VTCompressionSession (HEVC preferred / H.264, VideoToolbox)            │
+│       │ AVCC → Annex B, VPS/SPS/PPS (HEVC) or SPS/PPS (H.264) on IDR  │
 │       ▼                                                                 │
 │  Send queue (8-slot ring, 2MB/slot)                                     │
 │       │                                                                 │
@@ -69,7 +69,7 @@ Deep-dive reference for the Saccade Video Interface pipeline. Covers encoder and
 ### Invocation
 
 ```bash
-./svi-encoder <syphon-name> <dest-ip> <dest-port> [bitrate-mbps] [pace-mbps]
+./svi-encoder <syphon-name> <dest-ip> <dest-port> [bitrate-mbps] [pace-mbps] [--hevc]
 ```
 
 | Argument | Default | Description |
@@ -77,8 +77,9 @@ Deep-dive reference for the Saccade Video Interface pipeline. Covers encoder and
 | `syphon-name` | — | Syphon server name (`svi-list` to discover) |
 | `dest-ip` | — | Decoder IP address |
 | `dest-port` | — | Decoder UDP port |
-| `bitrate-mbps` | `40` | H.264 average bitrate |
+| `bitrate-mbps` | `40` | Average encode bitrate |
 | `pace-mbps` | `200` | Network pacing cap (min 50) |
+| `--hevc` | off | Encode as HEVC (H.265); recommended over H.264 |
 
 ### Capture
 
@@ -86,9 +87,9 @@ Syphon delivers each frame via a block callback. On each callback:
 
 1. A GL blit copies the Syphon texture (`GL_TEXTURE_RECTANGLE`) into a double-buffered IOSurface-backed FBO.
 2. A fence sync (`glFenceSync` / `glClientWaitSync`) waits up to 4 × 1ms for GPU completion. If all attempts time out, falls back to `glFinish()` (counted in `glfb` stat).
-3. The IOSurface is passed to VideoToolbox as a `CVPixelBuffer` for H.264 encoding.
+3. The IOSurface is passed to VideoToolbox as a `CVPixelBuffer` for HEVC or H.264 encoding.
 
-### H.264 Encode (VideoToolbox)
+### Encode (VideoToolbox)
 
 Key VTCompressionSession settings:
 
@@ -102,7 +103,7 @@ Key VTCompressionSession settings:
 | `MaxKeyFrameIntervalDuration` | 0.5s | Time-based IDR cap |
 | `ExpectedFrameRate` | 60 fps | Rate hint to encoder |
 
-The VT callback converts AVCC NALUs to Annex B format, injecting SPS and PPS before every keyframe. Output is queued into the send ring buffer.
+The VT callback converts AVCC NALUs to Annex B format, injecting parameter sets before every keyframe: VPS + SPS + PPS for HEVC, SPS + PPS for H.264. Output is queued into the send ring buffer.
 
 ### Send Queue and Pacing
 
@@ -137,19 +138,20 @@ A lock-free 8-slot ring buffer (2 MB per slot) decouples the VT callback thread 
 ### Invocation
 
 ```bash
-LIBVA_DRIVER_NAME=i965 ./svi-decoder <port> [--async-flip]
+LIBVA_DRIVER_NAME=i965 ./svi-decoder <port> [--async-flip] [--hevc]
 ```
 
 In production, run with RT scheduling:
 
 ```bash
-LIBVA_DRIVER_NAME=i965 chrt -f 50 taskset -c 1-3 ./svi-decoder 5004 --async-flip
+LIBVA_DRIVER_NAME=i965 chrt -f 50 taskset -c 1-3 ./svi-decoder 5004 --async-flip --hevc
 ```
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `port` | — | UDP listen port |
 | `--async-flip` | off | Enable `DRM_MODE_PAGE_FLIP_ASYNC`; auto-falls back to sync |
+| `--hevc` | off | Decode HEVC (H.265) stream; must match encoder (recommended) |
 
 ### Packet Reception and Frame Reassembly
 
@@ -243,7 +245,7 @@ Double-buffered GBM buffers are used to prevent tearing. The decoder waits for t
 
 ## Packet Protocol
 
-Each UDP datagram carries one packet of a single H.264 frame.
+Each UDP datagram carries one packet of a single video frame (HEVC or H.264).
 
 ### Header (24 bytes, all fields network byte order)
 
@@ -252,7 +254,7 @@ struct pkt_hdr {
     uint32_t frame_id;       // Monotonic frame counter; 0xFFFFFFFF = clock sync
     uint16_t pkt_idx;        // 0-based packet index within frame
     uint16_t pkt_total;      // Total packets in this frame
-    uint32_t payload_len;    // Bytes of H.264 data in this packet (≤1400)
+    uint32_t payload_len;    // Bytes of video data in this packet (≤1400)
     uint8_t  flags;          // bit 0: keyframe; bit 1: end-of-frame; 0x80: sync pong
     uint8_t  reserved[3];
     uint64_t encode_ts_ns;   // Encoder wall-clock timestamp (nanoseconds)
@@ -450,7 +452,7 @@ apt install \
 | 150 | ~2ms | Slightly extended; useful on congested links |
 | 50 | ~6ms | Conservative; for shared 100 Mbps links |
 
-`bitrate_mbps` is the H.264 target rate. Larger keyframes are rate-limited by `DataRateLimits` (200 KB / 33ms window); inter-frames are smaller.
+`bitrate_mbps` is the target encode rate. Larger keyframes are rate-limited by `DataRateLimits` (200 KB / 33ms window); inter-frames are smaller.
 
 ### Async vs Sync Flip
 
@@ -476,7 +478,7 @@ sysctl -w net.core.rmem_max=33554432
 
 ### Encoder
 
-- **macOS**: VideoToolbox H.264 requires macOS 10.8+. Tested on Apple Silicon and Intel Macs.
+- **macOS**: VideoToolbox H.264 requires macOS 10.8+; HEVC requires macOS 10.13+. Tested on Apple Silicon and Intel Macs.
 - **Syphon**: The encoder uses Syphon.framework bundled with Resolume Arena. Building against the standalone Syphon SDK is untested but should work with an updated `-F` path.
 
 ### Decoder
@@ -493,7 +495,7 @@ sysctl -w net.core.rmem_max=33554432
 | Area | Limitation |
 |------|-----------|
 | Encoder drop | If the sender thread can't drain the ring buffer fast enough, the oldest frame in the next slot is silently dropped. |
-| Max frame size | H.264 Annex B data per frame is capped at 2 MB (~14,000 packets). Exceeding this would require a larger ring slot. |
+| Max frame size | Annex B data per frame is capped at 2 MB (~14,000 packets). Exceeding this would require a larger ring slot. |
 | Single display | Decoder opens the first CRTC it finds; no multi-head support. |
 | DRM device path | `/dev/dri/card0` and `/dev/dri/renderD128` are hardcoded. |
 | NV12 only | VAAPI output is always NV12 (8-bit, 4:2:0). No 10-bit or 4:4:4 support. |
