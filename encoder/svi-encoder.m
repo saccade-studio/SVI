@@ -125,6 +125,9 @@ typedef struct {
 
     /* clock sync */
     int listen_sock;
+
+    /* codec selection */
+    int use_hevc;
 } enc_ctx;
 
 static enc_ctx g_enc;
@@ -286,24 +289,45 @@ static void encode_callback(void *outputCallbackRefCon,
     static uint8_t annex_b[MAX_ANNEX_B];
     size_t ab_len = 0;
 
-    /* prepend SPS/PPS on keyframes */
+    /* prepend parameter sets on keyframes (SPS/PPS for H.264; VPS/SPS/PPS for HEVC) */
     if (keyframe) {
         CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sampleBuffer);
         size_t param_count = 0;
-        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(fmt, 0, NULL, NULL,
-                                                           &param_count, NULL);
-        for (size_t pi = 0; pi < param_count; pi++) {
-            const uint8_t *ps = NULL;
-            size_t ps_size = 0;
-            OSStatus pst = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                fmt, pi, &ps, &ps_size, NULL, NULL);
-            if (pst != noErr || !ps) continue;
-            if (ab_len + 4 + ps_size > MAX_ANNEX_B) break;
-            annex_b[ab_len] = 0; annex_b[ab_len+1] = 0;
-            annex_b[ab_len+2] = 0; annex_b[ab_len+3] = 1;
-            ab_len += 4;
-            memcpy(annex_b + ab_len, ps, ps_size);
-            ab_len += ps_size;
+
+        if (enc->use_hevc) {
+            /* HEVC: VPS(0) → SPS(1) → PPS(2) — order is required by spec */
+            CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, 0, NULL, NULL,
+                                                               &param_count, NULL);
+            for (size_t pi = 0; pi < param_count; pi++) {
+                const uint8_t *ps = NULL;
+                size_t ps_size = 0;
+                OSStatus pst = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                    fmt, pi, &ps, &ps_size, NULL, NULL);
+                if (pst != noErr || !ps) continue;
+                if (ab_len + 4 + ps_size > MAX_ANNEX_B) break;
+                annex_b[ab_len] = 0; annex_b[ab_len+1] = 0;
+                annex_b[ab_len+2] = 0; annex_b[ab_len+3] = 1;
+                ab_len += 4;
+                memcpy(annex_b + ab_len, ps, ps_size);
+                ab_len += ps_size;
+            }
+        } else {
+            /* H.264: SPS(0) → PPS(1) */
+            CMVideoFormatDescriptionGetH264ParameterSetAtIndex(fmt, 0, NULL, NULL,
+                                                               &param_count, NULL);
+            for (size_t pi = 0; pi < param_count; pi++) {
+                const uint8_t *ps = NULL;
+                size_t ps_size = 0;
+                OSStatus pst = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    fmt, pi, &ps, &ps_size, NULL, NULL);
+                if (pst != noErr || !ps) continue;
+                if (ab_len + 4 + ps_size > MAX_ANNEX_B) break;
+                annex_b[ab_len] = 0; annex_b[ab_len+1] = 0;
+                annex_b[ab_len+2] = 0; annex_b[ab_len+3] = 1;
+                ab_len += 4;
+                memcpy(annex_b + ab_len, ps, ps_size);
+                ab_len += ps_size;
+            }
         }
     }
 
@@ -404,12 +428,18 @@ int main(int argc, const char *argv[]) {
     int pace_mbps = (argc > 5) ? atoi(argv[5]) : 200;
     if (pace_mbps < 50) pace_mbps = 50;
 
+    int use_hevc = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--hevc") == 0) use_hevc = 1;
+    }
+
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
     mach_timebase_info(&g_timebase);
 
-    fprintf(stderr, "svi-encoder: name=%s dest=%s:%d bitrate=%dMbps pace=%dMbps\n",
-            syphon_name, dest_ip, dest_port, bitrate_mbps, pace_mbps);
+    fprintf(stderr, "svi-encoder: name=%s dest=%s:%d bitrate=%dMbps pace=%dMbps codec=%s\n",
+            syphon_name, dest_ip, dest_port, bitrate_mbps, pace_mbps,
+            use_hevc ? "HEVC" : "H264");
 
     @autoreleasepool {
 
@@ -495,6 +525,7 @@ int main(int argc, const char *argv[]) {
     /* --- UDP socket --- */
     memset(&g_enc, 0, sizeof(g_enc));
     g_enc.pace_mbps = (uint32_t)pace_mbps;
+    g_enc.use_hevc = use_hevc;
     g_enc.sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (g_enc.sock < 0) { perror("socket"); return 1; }
     int sndbuf = 524288;
@@ -591,8 +622,9 @@ int main(int argc, const char *argv[]) {
         (id)kCVPixelBufferHeightKey: @(height),
     };
 
+    CMVideoCodecType codec_type = use_hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264;
     OSStatus vts = VTCompressionSessionCreate(kCFAllocatorDefault,
-        width, height, kCMVideoCodecType_H264,
+        width, height, codec_type,
         (__bridge CFDictionaryRef)encoderSpec,
         (__bridge CFDictionaryRef)srcAttrs,
         kCFAllocatorDefault,
@@ -632,11 +664,15 @@ int main(int argc, const char *argv[]) {
     VTSessionSetProperty(vtSession, kVTCompressionPropertyKey_ExpectedFrameRate, fpsRef);
     CFRelease(fpsRef);
 
-    VTSessionSetProperty(vtSession, kVTCompressionPropertyKey_ProfileLevel,
-                         kVTProfileLevel_H264_High_AutoLevel);
+    CFStringRef profile_level = use_hevc
+        ? kVTProfileLevel_HEVC_Main_AutoLevel
+        : kVTProfileLevel_H264_High_AutoLevel;
+    VTSessionSetProperty(vtSession, kVTCompressionPropertyKey_ProfileLevel, profile_level);
 
-    /* data rate limits: cap per-frame to 200KB / (1/30)s to prevent huge keyframes */
-    int limit_bytes = 200 * 1024;  /* 200KB max per window */
+    /* data rate limits: 5KB per Mbps per window, scales with bitrate_mbps.
+     * At 40Mbps → 200KB; at 80Mbps → 400KB. Allows keyframe headroom without
+     * capping the average rate below what was requested. */
+    int limit_bytes = bitrate_mbps * 5 * 1024;
     float limit_window = 1.0f / 30.0f;  /* ~33ms window */
     CFNumberRef limitBytes = CFNumberCreate(NULL, kCFNumberSInt32Type, &limit_bytes);
     CFNumberRef limitWindow = CFNumberCreate(NULL, kCFNumberFloat32Type, &limit_window);
@@ -648,8 +684,8 @@ int main(int argc, const char *argv[]) {
     CFRelease(limitWindow);
 
     VTCompressionSessionPrepareToEncodeFrames(vtSession);
-    fprintf(stderr, "VTCompressionSession ready: %dMbps, GOP=%d, pace=%dMbps, low-latency\n",
-            bitrate_mbps, gop, pace_mbps);
+    fprintf(stderr, "VTCompressionSession ready: %s %dMbps, GOP=%d, pace=%dMbps, low-latency\n",
+            use_hevc ? "HEVC" : "H264", bitrate_mbps, gop, pace_mbps);
 
     /* --- frame pacing --- */
     g_enc.frame_interval_ns = 16666667; /* 60fps */

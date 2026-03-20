@@ -404,9 +404,10 @@ static void send_clock_ping(struct receiver *rs) {
 int main(int argc, char **argv) {
     int port = (argc > 1) ? atoi(argv[1]) : 5004;
     int async_flip = 0;
+    int use_hevc = 0;
     for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--async-flip") == 0)
-            async_flip = 1;
+        if (strcmp(argv[i], "--async-flip") == 0) async_flip = 1;
+        if (strcmp(argv[i], "--hevc") == 0)       use_hevc = 1;
     }
     int async_flip_enabled = async_flip;
     g_listen_port = port;
@@ -417,7 +418,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    printf("svi-decoder: EGL zero-copy H.264 VAAPI receiver (UDP)\n");
+    printf("svi-decoder: EGL zero-copy %s VAAPI receiver (UDP)\n", use_hevc ? "HEVC" : "H.264");
     printf("Listening on UDP port %d\n\n", port);
     printf("Flip mode: %s\n", async_flip ? "async-requested" : "sync");
 
@@ -589,8 +590,8 @@ int main(int argc, char **argv) {
     AVVAAPIDeviceContext *vadev = (AVVAAPIDeviceContext *)hwdev->hwctx;
     VADisplay va_dpy = vadev->display;
 
-    const AVCodec *dec = avcodec_find_decoder(AV_CODEC_ID_H264);
-    if (!dec) { fprintf(stderr, "H.264 decoder not found\n"); return 1; }
+    const AVCodec *dec = avcodec_find_decoder(use_hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
+    if (!dec) { fprintf(stderr, "%s decoder not found\n", use_hevc ? "HEVC" : "H.264"); return 1; }
     AVCodecContext *dc = avcodec_alloc_context3(dec);
     dc->hw_device_ctx = av_buffer_ref(hw_device_ctx);
     dc->get_format = get_vaapi_format;
@@ -600,8 +601,8 @@ int main(int argc, char **argv) {
     ret = avcodec_open2(dc, dec, NULL);
     if (ret < 0) { fprintf(stderr, "avcodec_open2 failed: %s\n", av_err2str(ret)); return 1; }
 
-    AVCodecParserContext *parser = av_parser_init(AV_CODEC_ID_H264);
-    if (!parser) { fprintf(stderr, "H.264 parser init failed\n"); return 1; }
+    AVCodecParserContext *parser = av_parser_init(use_hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
+    if (!parser) { fprintf(stderr, "%s parser init failed\n", use_hevc ? "HEVC" : "H.264"); return 1; }
 
     printf("VAAPI H.264 decoder ready\n");
 
@@ -627,7 +628,7 @@ int main(int argc, char **argv) {
     int awaiting_keyframe = 1;
     uint64_t t_start = now_ns();
     uint64_t t_last_stats = t_start;
-    double sum_export = 0, sum_import = 0, sum_render = 0, sum_flip = 0, sum_wait = 0;
+    double sum_export = 0, sum_import = 0, sum_render = 0, sum_flip = 0, sum_wait = 0, sum_vasync = 0;
     double sum_latency = 0;
     int n_latency = 0;
 
@@ -725,7 +726,9 @@ int main(int argc, char **argv) {
         while (avcodec_receive_frame(dc, hw_frame) == 0) {
             n_frames++;
             VASurfaceID surf = (VASurfaceID)(uintptr_t)hw_frame->data[3];
+            uint64_t t_vasync0 = now_ns();
             vaSyncSurface(va_dpy, surf);
+            sum_vasync += (now_ns() - t_vasync0) / 1e6;
 
             /* Export as DMA-BUF */
             uint64_t t1 = now_ns();
@@ -843,8 +846,9 @@ int main(int argc, char **argv) {
             if (t_now - t_last_stats > 5000000000ULL) {
                 double elapsed = (t_now - t_start) / 1e9;
                 double fps = n_rendered / elapsed;
-                printf("%.1ffps | %d rendered | active=%.2fms/f",
+                printf("%.1ffps | %d rendered | vasync=%.2fms active=%.2fms/f",
                        fps, n_rendered,
+                       sum_vasync / n_rendered,
                        (sum_export + sum_import + sum_render + sum_flip) / n_rendered);
                 if (n_gl_fallback > 0)
                     printf(" | glfb=%d", n_gl_fallback);
@@ -882,7 +886,8 @@ int main(int argc, char **argv) {
     printf("Frames: %d decoded, %d rendered\n", n_frames, n_rendered);
     if (n_rendered > 0) {
         printf("FPS: %.1f\n", n_rendered / total_s);
-        printf("Per-frame: export=%.3f import=%.3f wait=%.3f render=%.3f flip=%.3f active=%.3fms\n",
+        printf("Per-frame: vasync=%.3f export=%.3f import=%.3f wait=%.3f render=%.3f flip=%.3f active=%.3fms\n",
+               sum_vasync / n_rendered,
                sum_export / n_rendered, sum_import / n_rendered,
                sum_wait / n_rendered,
                sum_render / n_rendered, sum_flip / n_rendered,
