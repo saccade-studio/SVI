@@ -417,7 +417,7 @@ static GLuint create_blit_program(void) {
 
 int main(int argc, const char *argv[]) {
     if (argc < 4) {
-        fprintf(stderr, "Usage: %s <syphon_name> <dest_ip> <dest_port> [bitrate_mbps] [pace_mbps]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <syphon_name> <dest_ip> <dest_port> [bitrate_mbps] [pace_mbps] [--h264]\n", argv[0]);
         return 1;
     }
 
@@ -428,9 +428,10 @@ int main(int argc, const char *argv[]) {
     int pace_mbps = (argc > 5) ? atoi(argv[5]) : 200;
     if (pace_mbps < 50) pace_mbps = 50;
 
-    int use_hevc = 0;
+    int use_hevc = 1; /* default to HEVC */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--hevc") == 0) use_hevc = 1;
+        if (strcmp(argv[i], "--h264") == 0) use_hevc = 0;
+        if (strcmp(argv[i], "--hevc") == 0) use_hevc = 1; /* legacy no-op when already default */
     }
 
     signal(SIGINT, sig_handler);

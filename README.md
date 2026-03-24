@@ -71,14 +71,14 @@ SSH_PASSWORD=<password> bash deploy.sh <target-ip>
 # List available Syphon sources
 ./svi-list
 
-# Stream to decoder (HEVC, recommended)
-./svi-encoder <syphon-name> <dest-ip> <dest-port> [bitrate-mbps] [pace-mbps] --hevc
+# Stream to decoder (HEVC default)
+./svi-encoder <syphon-name> <dest-ip> <dest-port> [bitrate-mbps] [pace-mbps]
 
 # Example: 40 Mbps encode, 200 Mbps pacing, HEVC
-./svi-encoder Composition 192.168.1.10 5004 40 200 --hevc
-
-# H.264 fallback (omit --hevc flag)
 ./svi-encoder Composition 192.168.1.10 5004 40 200
+
+# H.264 fallback
+./svi-encoder Composition 192.168.1.10 5004 40 200 --h264
 ```
 
 ---
@@ -102,13 +102,14 @@ Measured on 2026-03-19, Intel Cherry Trail decoder over point-to-point GigE:
 ## Decoder Flags
 
 ```
-svi-decoder <port> [--async-flip] [--hevc]
+svi-decoder <port> [--async-flip] [--h264]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--async-flip` | Use `DRM_MODE_PAGE_FLIP_ASYNC` (recommended; auto-falls back to sync if unsupported) |
-| `--hevc` | Decode HEVC (H.265) stream; must match encoder (recommended) |
+| `--h264` | Decode H.264 stream (override the default HEVC) |
+| `--hevc` | (Legacy) Explicitly request HEVC; redundant with default |
 
 ---
 

@@ -404,10 +404,11 @@ static void send_clock_ping(struct receiver *rs) {
 int main(int argc, char **argv) {
     int port = (argc > 1) ? atoi(argv[1]) : 5004;
     int async_flip = 0;
-    int use_hevc = 0;
+    int use_hevc = 1; /* default to HEVC */
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--async-flip") == 0) async_flip = 1;
-        if (strcmp(argv[i], "--hevc") == 0)       use_hevc = 1;
+        if (strcmp(argv[i], "--h264") == 0)       use_hevc = 0;
+        if (strcmp(argv[i], "--hevc") == 0)       use_hevc = 1; /* legacy no-op */
     }
     int async_flip_enabled = async_flip;
     g_listen_port = port;

@@ -69,7 +69,7 @@ Deep-dive reference for the Saccade Video Interface pipeline. Covers encoder and
 ### Invocation
 
 ```bash
-./svi-encoder <syphon-name> <dest-ip> <dest-port> [bitrate-mbps] [pace-mbps] [--hevc]
+./svi-encoder <syphon-name> <dest-ip> <dest-port> [bitrate-mbps] [pace-mbps] [--h264]
 ```
 
 | Argument | Default | Description |
@@ -79,7 +79,8 @@ Deep-dive reference for the Saccade Video Interface pipeline. Covers encoder and
 | `dest-port` | — | Decoder UDP port |
 | `bitrate-mbps` | `40` | Average encode bitrate |
 | `pace-mbps` | `200` | Network pacing cap (min 50) |
-| `--hevc` | off | Encode as HEVC (H.265); recommended over H.264 |
+| `--h264` | off | Encode as H.264 (override default HEVC) |
+| `--hevc` | on  | Encode as HEVC (H.265); default / legacy flag |
 
 ### Capture
 
@@ -138,20 +139,21 @@ A lock-free 8-slot ring buffer (2 MB per slot) decouples the VT callback thread 
 ### Invocation
 
 ```bash
-LIBVA_DRIVER_NAME=i965 ./svi-decoder <port> [--async-flip] [--hevc]
+LIBVA_DRIVER_NAME=i965 ./svi-decoder <port> [--async-flip] [--h264]
 ```
 
 In production, run with RT scheduling:
 
 ```bash
-LIBVA_DRIVER_NAME=i965 chrt -f 50 taskset -c 1-3 ./svi-decoder 5004 --async-flip --hevc
+LIBVA_DRIVER_NAME=i965 chrt -f 50 taskset -c 1-3 ./svi-decoder 5004 --async-flip
 ```
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `port` | — | UDP listen port |
 | `--async-flip` | off | Enable `DRM_MODE_PAGE_FLIP_ASYNC`; auto-falls back to sync |
-| `--hevc` | off | Decode HEVC (H.265) stream; must match encoder (recommended) |
+| `--h264` | off | Decode H.264 stream (override default HEVC) |
+| `--hevc` | on  | Decode HEVC (H.265); default / legacy flag |
 
 ### Packet Reception and Frame Reassembly
 
