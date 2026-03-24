@@ -1,6 +1,10 @@
 # Saccade Video Interface (SVI)
 
+<<<<<<< Updated upstream
 Ultra-low-latency 1080p60 video pipeline from Resolume Arena to HDMI display over GigE. Captures via Syphon (zero-copy GPU), encodes HEVC (H.265) with VideoToolbox, streams over paced UDP, and decodes with VAAPI hardware acceleration on a Linux display node. H.264 is also supported but HEVC is preferred.
+=======
+Ultra-low-latency 1080p60 video pipeline from Resolume Arena to HDMI display over GigE. Captures via Syphon (zero-copy GPU), encodes HEVC (H.265) with VideoToolbox, streams over paced UDP, and decodes with VAAPI hardware acceleration on a Linux display node. H.264 is also supported; HEVC is preferred.
+>>>>>>> Stashed changes
 
 **Typical end-to-end latency: ~21–23ms** (async flip, GigE)
 
